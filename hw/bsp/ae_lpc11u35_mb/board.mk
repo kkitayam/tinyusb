@@ -1,4 +1,4 @@
-DEPS_SUBMODULES += hw/mcu/nxp
+DEPS_SUBMODULES += hw/mcu/nxp/lpcopen
 
 CFLAGS += \
   -flto \
@@ -42,5 +42,5 @@ FREERTOS_PORT = ARM_CM0
 JLINK_DEVICE = LPC11U35/501
 
 # flash using pyocd 
-flash: $(BUILD)/$(BOARD)-firmware.hex
+flash: $(BUILD)/$(PROJECT).hex
 	pyocd flash -t lpc11u35 $<
