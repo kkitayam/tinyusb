@@ -243,6 +243,12 @@ void board_init(void)
   IEN(ICU,GROUPBL0)  = 1;
   EN(SCI5, TEI5)     = 1;
 
+  /* Enable DMAC */
+  SYSTEM.PRCR.WORD = SYSTEM_PRCR_PRKEY | SYSTEM_PRCR_PRC1;
+  MSTP(DMAC)       = 0;
+  SYSTEM.PRCR.WORD = SYSTEM_PRCR_PRKEY;
+  DMAC.DMAST.BYTE  = 1;
+
   /* setup USBI0 interrupt. */
   IR(USB0, USBI0)  = 0;
   IPR(USB0, USBI0) = IRQ_PRIORITY_USBI0;

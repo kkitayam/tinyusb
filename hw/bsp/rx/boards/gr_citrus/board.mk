@@ -3,6 +3,7 @@ DEPS_SUBMODULES += hw/mcu/renesas/rx
 CFLAGS += \
   -mcpu=rx610 \
   -misa=v1 \
+  -DCFG_MCU_RX_DMA_CH=3 \
   -DCFG_TUSB_MCU=OPT_MCU_RX63X
 
 MCU_DIR = hw/mcu/renesas/rx/rx63n

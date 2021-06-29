@@ -37,6 +37,16 @@
 #include "device/dcd.h"
 #include "iodefine.h"
 
+#if defined(CFG_MCU_RX_DMA_CH) && ((CFG_MCU_RX_DMA_CH < 0) || (3 < CFG_MCU_RX_DMA_CH))
+#error CFG_MCU_RX_DMA_CH must be a value between 0 and 3.
+#endif
+
+#define XDMAC_SYM(x)    DMAC ## x
+#define DMAC_SYM(x)     XDMAC_SYM(x)
+#ifdef CFG_MCU_RX_DMA_CH
+#define USB_DM          DMAC_SYM(CFG_MCU_RX_DMA_CH)
+#endif
+
 //--------------------------------------------------------------------+
 // MACRO TYPEDEF CONSTANT ENUM DECLARATION
 //--------------------------------------------------------------------+
@@ -96,8 +106,19 @@
 #define USB_PIPECFG_ISO      (3u<<14)
 #define USB_PIPECFG_INT      (2u<<14)
 
+#define USB_PIPEPERI_IFIS    (1u<<12)
+
 #define FIFO_REQ_CLR         (1u)
 #define FIFO_COMPLETE        (1u<<1)
+
+#define DMA_DMTMD_SZ_16      (1u<<8)
+#define DMA_DMTMD_MD_BLK     (2u<<14)
+#define DMA_DMAMD_DM_INC     (2u<<6)
+#define DMA_DMAMD_DM_FIX     (0u<<6)
+#define DMA_DMAMD_SM_FIX     (0u<<14)
+#define DMA_DMAMD_SM_INC     (2u<<14)
+#define DMA_DMREQ_SWREQ      (1u)
+#define DMA_DMREQ_CLRS       (1u<<4)
 
 // Start of definition of packed structs (used by the CCRX toolchain)
 TU_ATTR_PACKED_BEGIN
@@ -115,14 +136,6 @@ typedef struct {
   };
   uint16_t TRN;
 } reg_pipetre_t;
-
-typedef union {
-  struct {
-    volatile uint16_t u8: 8;
-    volatile uint16_t   : 0;
-  };
-  volatile uint16_t u16;
-} hw_fifo_t;
 
 typedef struct TU_ATTR_PACKED
 {
@@ -257,18 +270,57 @@ static inline void pipe_wait_for_ready(unsigned num)
   while (!USB0.D0FIFOCTR.BIT.FRDY) ;
 }
 
+#ifdef USB_DM
 static void pipe_write_packet(void *buf, volatile void *fifo, unsigned len)
 {
-  volatile hw_fifo_t *reg = (volatile hw_fifo_t*) fifo;
+  if ((uintptr_t)buf & 1u) {
+    /* buf is not 2-byte aligned */
+    *(volatile uint8_t*)fifo = *(uint8_t*)buf;
+    buf = (uint8_t*)buf + 1;
+    --len;
+  }
+  if (len > 1) {
+    USB_DM.DMTMD.WORD = DMA_DMTMD_MD_BLK | DMA_DMTMD_SZ_16;
+    USB_DM.DMAMD.WORD = DMA_DMAMD_DM_FIX | DMA_DMAMD_SM_INC;
+    USB_DM.DMSAR      = buf;
+    USB_DM.DMDAR      = (void*)fifo;
+    USB_DM.DMCRA      = ((len / 2) << 16) | (len / 2);
+    USB_DM.DMCRB      = 1;
+    USB_DM.DMCNT.BYTE = 1;
+    USB_DM.DMREQ.BYTE = DMA_DMREQ_SWREQ;
+    /* wait for completion */
+    while (USB_DM.DMCNT.BYTE) ;
+  }
+  if (len & 1u) {
+    /* length is not 2-byte unit */
+    buf = (uint8_t*)buf + (len & ~1);
+    *(volatile uint8_t*)fifo = *(uint8_t*)buf;
+  }
+}
+static void pipe_read_packet(void *buf, volatile void *fifo, unsigned len)
+{
+  USB_DM.DMTMD.WORD = DMA_DMTMD_MD_BLK;
+  USB_DM.DMAMD.WORD = DMA_DMAMD_DM_INC | DMA_DMAMD_SM_FIX;
+  USB_DM.DMSAR      = (void*)fifo;
+  USB_DM.DMDAR      = buf;
+  USB_DM.DMCRA      = (len << 16) | len;
+  USB_DM.DMCRB      = 1;
+  USB_DM.DMCNT.BYTE = 1;
+  USB_DM.DMREQ.BYTE = DMA_DMREQ_SWREQ;
+  /* wait for completion */
+  while (USB_DM.DMCNT.BYTE) ;
+}
+#else
+static void pipe_write_packet(void *buf, volatile void *fifo, unsigned len)
+{
   uintptr_t addr = (uintptr_t)buf;
   while (len >= 2) {
-    reg->u16 = *(const uint16_t *)addr;
+    *(volatile uint16_t*)fifo = *(uint16_t *)addr;
     addr += 2;
     len  -= 2;
   }
   if (len) {
-    reg->u8 = *(const uint8_t *)addr;
-    ++addr;
+    *(volatile uint8_t*)fifo = *(uint8_t *)addr;
   }
 }
 
@@ -278,6 +330,7 @@ static void pipe_read_packet(void *buf, volatile void *fifo, unsigned len)
   volatile uint8_t *reg = (volatile uint8_t*)fifo;  /* byte access is always at base register address */
   while (len--) *p++ = *reg;
 }
+#endif
 
 static void pipe_read_write_packet_ff(tu_fifo_t *f, volatile void *fifo, unsigned len, unsigned dir)
 {
@@ -478,7 +531,7 @@ static bool process_pipe_xfer(int buffer_type, uint8_t ep_addr, void* buffer, ui
 
   TU_ASSERT(num);
 
-  pipe_state_t *pipe  = &_dcd.pipe[num];
+  pipe_state_t *pipe = &_dcd.pipe[num];
   pipe->ff        = buffer_type;
   pipe->buf       = buffer;
   pipe->length    = total_bytes;
@@ -713,15 +766,18 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const * ep_desc)
   volatile uint16_t *ctr = get_pipectr(num);
   *ctr = USB_PIPECTR_ACLRM | USB_PIPECTR_SQCLR;
   *ctr = 0;
-  unsigned cfg = (dir << 4) | epn;
+  unsigned cfg  = (dir << 4) | epn;
+  unsigned peri = 0;
   if (xfer == TUSB_XFER_BULK) {
     cfg |= USB_PIPECFG_BULK | USB_PIPECFG_SHTNAK | USB_PIPECFG_DBLB;
   } else if (xfer == TUSB_XFER_INTERRUPT) {
     cfg |= USB_PIPECFG_INT;
   } else {
     cfg |= USB_PIPECFG_ISO | USB_PIPECFG_DBLB;
+    peri = USB_PIPEPERI_IFIS | 1;
   }
   USB0.PIPECFG.WORD  = cfg;
+  USB0.PIPEPERI.WORD = peri;
   USB0.BRDYSTS.WORD  = 0x1FFu ^ TU_BIT(num);
   USB0.BRDYENB.WORD |= TU_BIT(num);
   if (dir || (xfer != TUSB_XFER_BULK)) {
@@ -752,6 +808,7 @@ void dcd_edpt_close(uint8_t rhport, uint8_t ep_addr)
   const unsigned dir = tu_edpt_dir(ep_addr);
   const unsigned num = _dcd.ep[dir][epn];
 
+  dcd_int_disable(rhport);
   USB0.BRDYENB.WORD &= ~TU_BIT(num);
   volatile uint16_t *ctr = get_pipectr(num);
   *ctr = 0;
@@ -759,6 +816,8 @@ void dcd_edpt_close(uint8_t rhport, uint8_t ep_addr)
   USB0.PIPECFG.WORD = 0;
   _dcd.pipe[num].ep = 0;
   _dcd.ep[dir][epn] = 0;
+  // TU_LOG1("- %d\r\n", USB0.PIPESEL.WORD);
+  dcd_int_enable(rhport);
 }
 
 bool dcd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t* buffer, uint16_t total_bytes)

@@ -201,6 +201,18 @@ void board_init(void)
   IEN(SCI0, RXI0) = 1;
   IEN(SCI0, TXI0) = 1;
   IEN(SCI0, TEI0) = 1;
+
+  /* Enable DMAC */
+  SYSTEM.PRCR.WORD = SYSTEM_PRCR_PRKEY | SYSTEM_PRCR_PRC1;
+  MSTP(DMAC)       = 0;
+  SYSTEM.PRCR.WORD = SYSTEM_PRCR_PRKEY;
+  DMAC.DMAST.BYTE  = 1;
+
+  /* TPU */
+  SYSTEM.PRCR.WORD = SYSTEM_PRCR_PRKEY | SYSTEM_PRCR_PRC1;
+  MSTP(TPU0)       = 0;
+  SYSTEM.PRCR.WORD = SYSTEM_PRCR_PRKEY;
+  TPUA.TSTR.BIT.CST0    = 1;
 }
 
 //--------------------------------------------------------------------+
