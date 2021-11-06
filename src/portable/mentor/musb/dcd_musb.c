@@ -38,6 +38,7 @@ _Pragma("GCC diagnostic ignored \"-Waddress-of-packed-member\"");
 
 #if TU_CHECK_MCU(OPT_MCU_MSP432E4)
   #include "musb_msp432e.h"
+  #define HAS_BUILTIN_DMA
 
 #elif TU_CHECK_MCU(OPT_MCU_TM4C123, OPT_MCU_TM4C129)
   #include "musb_tm4c.h"
@@ -60,6 +61,16 @@ typedef struct {
   uint_fast16_t beg; /* offset of including first element */
   uint_fast16_t end; /* offset of excluding the last element */
 } free_block_t;
+
+#ifdef HAS_BUILTIN_DMA
+typedef struct TU_ATTR_PACKED {
+  uint16_t  DMACTL;
+  uint16_t  RESERVED0;
+  uint32_t  DMAADDR;
+  uint32_t  DMACOUNT;
+  uint32_t  RESERVED1;
+} hw_dma_ctl_t;
+#endif
 
 typedef struct TU_ATTR_PACKED {
   uint16_t TXMAXP;
@@ -221,6 +232,41 @@ static inline volatile hw_endpoint_t* edpt_regs(unsigned epnum_minus1)
   return regs + epnum_minus1;
 }
 
+#ifdef HAS_BUILTIN_DMA
+static inline volatile hw_dma_ctl_t* dma_ctl_regs(unsigned dma_ch)
+{
+  volatile hw_dma_ctl_t *regs = (volatile hw_dma_ctl_t*)((uintptr_t)&USB0->DMACTL0);
+  return regs + dma_ch;
+}
+
+static inline hw_dma_ctl_t volatile *find_free_dma_ch(void)
+{
+  hw_dma_ctl_t volatile *dmac = dma_ctl_regs(0);
+  unsigned const num_dmach    = (USB0->RAMINFO & USB_RAMINFO_DMACHAN_M) >> USB_RAMINFO_DMACHAN_S;
+  for (unsigned i = 0; i < num_dmach; ++i, ++dmac) {
+    unsigned const epn = (dmac->DMACTL & USB_DMACTL0_EP_M) >> USB_DMACTL0_EP_S;
+    if (!epn) return dmac;
+  }
+  return NULL;
+}
+
+static bool pipe_read_write_packet_by_dma(void *buf, unsigned epn, unsigned len, unsigned dir_in)
+{
+  /* Address or length must be aligned 4 byte boundary for dedicated DMA.
+   * And, if short length, DMA is not used because PIO will be less instruction steps.*/
+  if ((len <= 16) || (len & 0x3) || ((uintptr_t)buf & 0x3) ) return false;
+  hw_dma_ctl_t volatile *dmac = find_free_dma_ch();
+  if (!dmac) return false;
+  dmac->DMAADDR  = (uintptr_t)buf;
+  dmac->DMACOUNT = len;
+  if (dir_in)
+    dmac->DMACTL = USB_DMACTL0_IE | USB_DMACTL0_ENABLE | (epn << USB_DMACTL0_EP_S) | USB_DMACTL0_DIR;
+  else
+    dmac->DMACTL = USB_DMACTL0_IE | USB_DMACTL0_ENABLE | (epn << USB_DMACTL0_EP_S);
+  return true;
+}
+#endif
+
 static void pipe_write_packet(void *buf, volatile void *fifo, unsigned len)
 {
   volatile hw_fifo_t *reg = (volatile hw_fifo_t*)fifo;
@@ -312,6 +358,9 @@ static bool handle_xfer_in(uint_fast8_t ep_addr)
     return true;
   }
 
+#ifdef HAS_BUILTIN_DMA
+  bool is_dma_running = false;
+#endif
   volatile hw_endpoint_t *regs = edpt_regs(epnum_minus1);
   const unsigned mps = regs->TXMAXP;
   const unsigned len = TU_MIN(mps, rem);
@@ -321,12 +370,19 @@ static bool handle_xfer_in(uint_fast8_t ep_addr)
     if (_dcd.pipe_buf_is_fifo[TUSB_DIR_IN] & TU_BIT(epnum_minus1)) {
       pipe_read_write_packet_ff(buf, &USB0->FIFO1_WORD + epnum_minus1, len, TUSB_DIR_IN);
     } else {
-      pipe_write_packet(buf, &USB0->FIFO1_WORD + epnum_minus1, len);
-      pipe->buf       = buf + len;
+#ifdef HAS_BUILTIN_DMA
+      is_dma_running = pipe_read_write_packet_by_dma(buf, epnum_minus1 + 1, len, TUSB_DIR_IN);
+      if (!is_dma_running)
+#endif
+        pipe_write_packet(buf, &USB0->FIFO1_WORD + epnum_minus1, len);
+      pipe->buf     = buf + len;
     }
     pipe->remaining = rem - len;
   }
-  regs->TXCSRL = USB_TXCSRL1_TXRDY;
+#ifdef HAS_BUILTIN_DMA
+  if (!is_dma_running)
+#endif
+    regs->TXCSRL = USB_TXCSRL1_TXRDY;
   // TU_LOG1(" TXCSRL%d = %x %d\n", epnum_minus1 + 1, regs->TXCSRL, rem - len);
   return false;
 }
@@ -340,6 +396,9 @@ static bool handle_xfer_out(uint_fast8_t ep_addr)
 
   TU_ASSERT(regs->RXCSRL & USB_RXCSRL1_RXRDY);
 
+#ifdef HAS_BUILTIN_DMA
+  bool is_dma_running = false;
+#endif
   const unsigned mps = regs->RXMAXP;
   const unsigned rem = pipe->remaining;
   const unsigned vld = regs->RXCOUNT;
@@ -349,23 +408,32 @@ static bool handle_xfer_out(uint_fast8_t ep_addr)
     if (_dcd.pipe_buf_is_fifo[TUSB_DIR_OUT] & TU_BIT(epnum_minus1)) {
       pipe_read_write_packet_ff(buf, &USB0->FIFO1_WORD + epnum_minus1, len, TUSB_DIR_OUT);
     } else {
-      pipe_read_packet(buf, &USB0->FIFO1_WORD + epnum_minus1, len);
-      pipe->buf       = buf + len;
+#ifdef HAS_BUILTIN_DMA
+      is_dma_running = pipe_read_write_packet_by_dma(buf, epnum_minus1 + 1, len, TUSB_DIR_OUT);
+      if (!is_dma_running)
+#endif
+        pipe_read_packet(buf, &USB0->FIFO1_WORD + epnum_minus1, len);
+      pipe->buf     = buf + len;
     }
     pipe->remaining = rem - len;
   }
   if ((len < mps) || (rem == len)) {
     pipe->buf = NULL;
+#ifdef HAS_BUILTIN_DMA
+    if (is_dma_running) return false;
+#endif
     return NULL != buf;
   }
-  regs->RXCSRL = 0; /* Clear RXRDY bit */
+#ifdef HAS_BUILTIN_DMA
+  if (!is_dma_running)
+#endif
+    regs->RXCSRL = 0; /* Clear RXRDY bit */
   return false;
 }
 
 static bool edpt_n_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer, uint16_t total_bytes)
 {
   (void)rhport;
-
   unsigned epnum_minus1 = tu_edpt_number(ep_addr) - 1;
   unsigned dir_in       = tu_edpt_dir(ep_addr);
 
@@ -561,6 +629,33 @@ static void process_edpt_n(uint8_t rhport, uint_fast8_t ep_addr)
   }
 }
 
+#ifdef HAS_BUILTIN_DMA
+static void process_dma_n(uint8_t rhport, uint_fast8_t dma_ch)
+{
+  hw_dma_ctl_t volatile *dmac = dma_ctl_regs(dma_ch);
+  unsigned const ctl = dmac->DMACTL;
+  dmac->DMACTL = 0; /* Free this DMA ch. */
+  unsigned const epn = (ctl & USB_DMACTL0_EP_M) >> USB_DMACTL0_EP_S;
+  TU_ASSERT(epn,);
+  // TU_LOG1("DMA CH%d EP%02x ADDR %08x\n", dma_ch, tu_edpt_addr(epn, (ctl & USB_DMACTL0_DIR) ? 1: 0), dmac->DMAADDR);
+  if (ctl & USB_DMACTL0_DIR) { /* IN */
+    hw_endpoint_t volatile *regs = edpt_regs(epn - 1);
+    regs->TXCSRL = USB_TXCSRL1_TXRDY; /* Go on the next packet transmission. */
+  } else { /* OUT */
+    pipe_state_t *pipe = &_dcd.pipe[TUSB_DIR_OUT][epn - 1];
+    if (pipe->buf) {
+      hw_endpoint_t volatile *regs = edpt_regs(epn - 1);
+      regs->RXCSRL = 0; /* Go on the next packet reception. */
+    } else {
+      dcd_event_xfer_complete(rhport,
+                              tu_edpt_addr(epn, TUSB_DIR_OUT),
+                              pipe->length - pipe->remaining,
+                              XFER_RESULT_SUCCESS, true);
+    }
+  }
+}
+#endif
+
 static void process_bus_reset(uint8_t rhport)
 {
   /* When bmRequestType is REQUEST_TYPE_INVALID(0xFF),
@@ -713,7 +808,13 @@ void dcd_edpt_close_all(uint8_t rhport)
   unsigned const ie = NVIC_GetEnableIRQ(USB0_IRQn);
   NVIC_DisableIRQ(USB0_IRQn);
   USB0->TXIE = 1; /* Enable only EP0 */
-  USB0->RXIE = 0; 
+  USB0->RXIE = 0;
+#ifdef HAS_BUILTIN_DMA
+  /* Stop all DMAs */
+  hw_dma_ctl_t volatile *dmac = dma_ctl_regs(0);
+  unsigned const num_dmach    = (USB0->RAMINFO & USB_RAMINFO_DMACHAN_M) >> USB_RAMINFO_DMACHAN_S;
+  for (unsigned i = 0; i < num_dmach; ++i, ++dmac) dmac->DMACTL = 0;
+#endif
   for (unsigned i = 1; i < DCD_ATTR_ENDPOINT_MAX; ++i) {
     regs->TXMAXP = 0;
     regs->TXCSRH = 0;
@@ -747,6 +848,20 @@ void dcd_edpt_close(uint8_t rhport, uint8_t ep_addr)
   hw_endpoint_t volatile *regs = edpt_regs(epn - 1);
   unsigned const ie = NVIC_GetEnableIRQ(USB0_IRQn);
   NVIC_DisableIRQ(USB0_IRQn);
+#ifdef HAS_BUILTIN_DMA
+  /* Stop DMA */
+  unsigned const target_ep    = (epn << USB_DMACTL0_EP_S) | (dir_in ? USB_DMACTL0_DIR : 0);
+  hw_dma_ctl_t volatile *dmac = dma_ctl_regs(0);
+  unsigned const num_dmach    = (USB0->RAMINFO & USB_RAMINFO_DMACHAN_M) >> USB_RAMINFO_DMACHAN_S;
+  for (unsigned i = 0; i < num_dmach; ++i, ++dmac) {
+    unsigned const dmaep = dmac->DMACTL & (USB_DMACTL0_EP_M|USB_DMACTL0_DIR);
+    if (dmaep == target_ep) {
+      dmac->DMACTL = 0;
+      break;
+    }
+  }
+#endif
+
   if (dir_in) {
     USB0->TXIE  &= ~TU_BIT(epn);
     regs->TXMAXP = 0;
@@ -856,11 +971,17 @@ void dcd_edpt_clear_stall(uint8_t rhport, uint8_t ep_addr)
 void dcd_int_handler(uint8_t rhport)
 {
   uint_fast8_t is, txis, rxis;
+#ifdef HAS_BUILTIN_DMA
+  uint_fast8_t dmais;
+#endif
 
-  is   = USB0->IS;   /* read and clear interrupt status */
-  txis = USB0->TXIS; /* read and clear interrupt status */
-  rxis = USB0->RXIS; /* read and clear interrupt status */
-  // TU_LOG1("D%2x T%2x R%2x\n", is, txis, rxis);
+  is    = USB0->IS;      /* read and clear interrupt status */
+  txis  = USB0->TXIS;    /* read and clear interrupt status */
+  rxis  = USB0->RXIS;    /* read and clear interrupt status */
+#ifdef HAS_BUILTIN_DMA
+  dmais = USB0->DMAINTR; /* read and clear interrupt status */
+#endif
+  // TU_LOG1("D%x T%x R%x D%x\n", is, txis, rxis, dmais);
 
   is &= USB0->IE; /* Clear disabled interrupts */
   if (is & USB_IS_DISCON) {
@@ -894,6 +1015,13 @@ void dcd_int_handler(uint8_t rhport)
     process_edpt_n(rhport, tu_edpt_addr(num, TUSB_DIR_OUT));
     rxis &= ~TU_BIT(num);
   }
+#ifdef HAS_BUILTIN_DMA
+  while (dmais) {
+    unsigned const num = __builtin_ctz(dmais);
+    process_dma_n(rhport, num);
+    dmais &= ~TU_BIT(num);
+  }
+#endif
 }
 
 #endif
