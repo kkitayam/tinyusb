@@ -1,5 +1,7 @@
 DEPS_SUBMODULES += lib/CMSIS_5 hw/mcu/ti
 
+include $(TOP)/$(BOARD_PATH)/board.mk
+
 CFLAGS += \
 	-flto \
 	-mthumb \
@@ -8,7 +10,6 @@ CFLAGS += \
 	-mcpu=cortex-m4 \
 	-mfloat-abi=hard \
 	-mfpu=fpv4-sp-d16 \
-	-D__MSP432E401Y__ \
 	-DCFG_TUSB_MCU=OPT_MCU_MSP432E4
 
 # mcu driver cause following warnings
