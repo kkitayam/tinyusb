@@ -86,11 +86,22 @@ enum
 #if CFG_TUSB_MCU == OPT_MCU_LPC175X_6X || CFG_TUSB_MCU == OPT_MCU_LPC177X_8X || CFG_TUSB_MCU == OPT_MCU_LPC40XX
   // LPC 17xx and 40xx endpoint type (bulk/interrupt/iso) are fixed by its number
   // 0 control, 1 In, 2 Bulk, 3 Iso, 4 In etc ...
-  #define EPNUM_CDC     2
-  #define EPNUM_VENDOR  5
+  #define EPNUM_CDC_IN     2
+  #define EPNUM_CDC_OUT    2
+  #define EPNUM_VENDOR_IN  5
+  #define EPNUM_VENDOR_OUT 5
+#elif CFG_TUSB_MCU == OPT_MCU_SAMG || CFG_TUSB_MCU ==  OPT_MCU_SAMX7X
+  // SAMG & SAME70 don't support a same endpoint number with different direction IN and OUT
+  //    e.g EP1 OUT & EP1 IN cannot exist together
+  #define EPNUM_CDC_IN     2
+  #define EPNUM_CDC_OUT    3
+  #define EPNUM_VENDOR_IN  4
+  #define EPNUM_VENDOR_OUT 5
 #else
-  #define EPNUM_CDC     2
-  #define EPNUM_VENDOR  3
+  #define EPNUM_CDC_IN     2
+  #define EPNUM_CDC_OUT    2
+  #define EPNUM_VENDOR_IN  3
+  #define EPNUM_VENDOR_OUT 3
 #endif
 
 uint8_t const desc_configuration[] =
@@ -99,10 +110,10 @@ uint8_t const desc_configuration[] =
   TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
 
   // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
-  TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, 0x81, 8, EPNUM_CDC, 0x80 | EPNUM_CDC, TUD_OPT_HIGH_SPEED ? 512 : 64),
+  TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, 0x81, 8, EPNUM_CDC_OUT, 0x80 | EPNUM_CDC_IN, TUD_OPT_HIGH_SPEED ? 512 : 64),
 
   // Interface number, string index, EP Out & IN address, EP size
-  TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5, EPNUM_VENDOR, 0x80 | EPNUM_VENDOR, TUD_OPT_HIGH_SPEED ? 512 : 64)
+  TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5, EPNUM_VENDOR_OUT, 0x80 | EPNUM_VENDOR_IN, TUD_OPT_HIGH_SPEED ? 512 : 64)
 };
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
@@ -229,7 +240,7 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid)
     const char* str = string_desc_arr[index];
 
     // Cap at max char
-    chr_count = strlen(str);
+    chr_count = (uint8_t) strlen(str);
     if ( chr_count > 31 ) chr_count = 31;
 
     // Convert ASCII string into UTF-16
@@ -240,7 +251,7 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid)
   }
 
   // first byte is length (including header), second byte is string type
-  _desc_str[0] = (TUSB_DESC_STRING << 8 ) | (2*chr_count + 2);
+  _desc_str[0] = (uint16_t) ((TUSB_DESC_STRING << 8 ) | (2*chr_count + 2));
 
   return _desc_str;
 }
