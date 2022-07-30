@@ -53,16 +53,6 @@ enum  {
 
 static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 
-#define URL  "www.tinyusb.org/examples/webusb-serial"
-
-const tusb_desc_webusb_url_t desc_url =
-{
-  .bLength         = 3 + sizeof(URL) - 1,
-  .bDescriptorType = 3, // WEBUSB URL type
-  .bScheme         = 1, // 0: http, 1: https
-  .url             = URL
-};
-
 //------------- prototypes -------------//
 void led_blinking_task(void);
 void cdc_task(void);
@@ -73,7 +63,8 @@ int main(void)
 {
   board_init();
 
-  tusb_init();
+  // init device stack on configured roothub port
+  tud_init(BOARD_TUD_RHPORT);
 
   DAP_Setup();
 
@@ -133,11 +124,6 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 
   switch (request->bRequest)
   {
-    case VENDOR_REQUEST_WEBUSB:
-      // match vendor request in BOS descriptor
-      // Get landing page url
-      return tud_control_xfer(rhport, request, (void*) &desc_url, desc_url.bLength);
-
     case VENDOR_REQUEST_MICROSOFT:
       if ( request->wIndex == 7 )
       {
