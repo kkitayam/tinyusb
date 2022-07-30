@@ -176,6 +176,7 @@ void dap_task(void)
 
   uint32_t result = DAP_ExecuteCommand((uint8_t*)req, rsp);
   tud_vendor_write(rsp, result & 0xFFFFU);
+  tud_vendor_flush();
 
   cdc_printf("%x %lx -> %lx %x\n", *(uint8_t*)req, count, result, rsp[1]);
   tud_cdc_write_flush();
