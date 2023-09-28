@@ -26,7 +26,7 @@
  */
 
 #include "chip.h"
-#include "../board.h"
+#include "bsp/board_api.h"
 #include "uart_11xx.h"
 
 //--------------------------------------------------------------------+
