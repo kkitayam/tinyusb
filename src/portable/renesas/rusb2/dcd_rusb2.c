@@ -70,6 +70,7 @@ typedef struct TU_ATTR_PACKED
   struct {
     uint32_t ep  : 8;  /* an assigned endpoint address */
     uint32_t ff  : 1;  /* `buf` is TU_FUFO or POD */
+    uint32_t bulk: 1;  /* The pipe is connected an bulk endpoint. */
     uint32_t     : 0;
   };
 } pipe_state_t;
@@ -347,7 +348,7 @@ static bool pipe_xfer_in(rusb2_reg_t* rusb, unsigned num)
   const unsigned rem  = pipe->remaining;
 
   if (!rem) {
-    wait_pipe_fifo_empty(rusb, num);
+    if (pipe->bulk) wait_pipe_fifo_empty(rusb, num);
     pipe->buf = NULL;
     return true;
   }
@@ -837,10 +838,13 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const * ep_desc)
 
   if (xfer == TUSB_XFER_BULK) {
     cfg |= (RUSB2_PIPECFG_TYPE_BULK | RUSB2_PIPECFG_SHTNAK_Msk | RUSB2_PIPECFG_DBLB_Msk);
+    _dcd.pipe[num].bulk = 1;
   } else if (xfer == TUSB_XFER_INTERRUPT) {
     cfg |= RUSB2_PIPECFG_TYPE_INT;
+    _dcd.pipe[num].bulk = 0;
   } else {
     cfg |= (RUSB2_PIPECFG_TYPE_ISO | RUSB2_PIPECFG_DBLB_Msk);
+    _dcd.pipe[num].bulk = 0;
   }
 
   rusb->PIPECFG = cfg;
